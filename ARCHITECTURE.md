@@ -38,15 +38,17 @@ Technical documentation for the quadruped robot codebase — data flows, executi
 ║      │          │                                               ║
 ║  ┌───▼──────────▼─────────────────────────────────────────┐    ║
 ║  │                    brain/llm.py                         │    ║
-║  │   (packages inputs → sends to Gemini → parses JSON)    │    ║
-║  └───────────────────────────┬─────────────────────────────┘   ║
-╚══════════════════════════════╤══════════════════════════════════╝
-                               │ HTTPS (Gemini API)
-╔══════════════════════════════▼═══════════════════════════════════╗
-║                      GOOGLE GEMINI (cloud AI)                    ║
-║   Receives: user speech + camera detections + sensor readings    ║
-║   Returns:  one JSON action  e.g. {"action": "walk_forward"}     ║
-╚══════════════════════════════════════════════════════════════════╝
+║  │  (packages inputs → tries Gemma → falls back to Gemini) │    ║
+║  └────────────────┬─────────────────────┬──────────────────┘   ║
+╚═══════════════════╤═════════════════════╤════════════════════════╝
+                    │ primary             │ fallback (optional)
+          (HTTP / local network)     (HTTPS / cloud)
+╔═══════════════════▼═════╗   ╔═══════════▼════════════════════════╗
+║  OLLAMA  (local)         ║   ║  GOOGLE GEMINI (cloud)             ║
+║  model: gemma4           ║   ║  model: gemini-2.5-flash           ║
+║  no internet required    ║   ║  requires GEMINI_API_KEY in .env   ║
+║  can run on Pi or LAN    ║   ║  activates only if Ollama fails    ║
+╚══════════════════════════╝   ╚════════════════════════════════════╝
 ```
 
 ---
@@ -125,6 +127,16 @@ quadruped/
 | `utils/logger.py` | Logging | Message + level string | Colour-coded terminal line |
 | `config.py` | Configuration | `.env` file | Constants used by all modules |
 
+### LLM Backend Priority
+
+`brain/llm.py` tries backends in this order on every `decide()` call:
+
+1. **Gemma 4 via Ollama** — primary. Local inference, no internet required. Can run on the Pi or on a separate machine on the LAN (`OLLAMA_BASE_URL` in `.env`).
+2. **Google Gemini** — fallback. Only active when `GEMINI_API_KEY` is set in `.env` and `google-generativeai` is installed. Activates automatically on any Ollama failure (connection refused, bad JSON, invalid action).
+3. **`{"action": "stop"}`** — last resort if both backends fail.
+
+Both sessions are kept warm in parallel so Gemini is already primed with the correct mode prompt before it's ever needed.
+
 ---
 
 ## Boot Sequence
@@ -170,7 +182,7 @@ Agent.run()
        ├──► sc.stand()              → all 8 servos go to standing pose
        ├──► oled.show("idle")       → OLED renders idle face variant
        ├──► module.detect()         → returns active mode string
-       ├──► llm.reset_session(mode) → creates Gemini chat session with mode prompt
+       ├──► llm.reset_session(mode) → creates Ollama + Gemini sessions with mode prompt
        └──► tts.speak("Ready. [mode] mode active.")
 ```
 
@@ -313,10 +325,10 @@ Triggered by voice from either the main loop or mid-mission. Gemini issues the `
 You say: "Switch to search and rescue mode"
                     │
                     ▼
-          llm.decide() → Gemini sees speech + camera + sensors
+          llm.decide() → AI sees speech + camera + sensors
                     │
                     ▼
-          Gemini returns:
+          AI returns:
           {
             "action": "set_mode",
             "mode":   "search_rescue",
@@ -328,17 +340,17 @@ You say: "Switch to search and rescue mode"
                     │
                     ├──► tts.speak(text)
                     ├──► llm.reset_session("search_rescue")
-                    │         └── New Gemini chat session
+                    │         └── Fresh Ollama + Gemini sessions
                     │         └── System prompt: emergency responder personality
-                    │         └── Previous history cleared
+                    │         └── Previous history cleared on both backends
                     └──► mode = "search_rescue"
 ```
 
 ---
 
-## What Gemini Receives Each Step
+## What the AI Receives Each Step
 
-Every `llm.decide()` call sends one text message into the persistent chat session:
+Every `llm.decide()` call sends one text message into the active chat session:
 
 ```
 Input: find the person
@@ -346,7 +358,7 @@ Camera sees: person (center), bottle (left)
 Sensor readings: PIR motion detected: True | Temperature: 24.5°C | Humidity: 55.0%
 ```
 
-Gemini replies with exactly one JSON object chosen from the valid action set:
+The AI replies with exactly one JSON object chosen from the valid action set:
 
 ```json
 {"action": "walk_forward"}
@@ -357,7 +369,9 @@ Gemini replies with exactly one JSON object chosen from the valid action set:
 
 Valid actions: `walk_forward`, `turn_left`, `turn_right`, `stop`, `complete`, `speak`, `set_mode`
 
-The chat session retains full message history — Gemini has context about everything said and seen since the session started or last mode switch.
+The chat session retains full message history — the AI has context about everything said and seen since the session started or last mode switch.
+
+Gemma 4 occasionally wraps its JSON in markdown fences (` ```json ``` `). `brain/llm.py` strips these automatically before parsing.
 
 ---
 
@@ -470,12 +484,38 @@ Face groups and their variants:
 
 ---
 
+## LLM Fallback Chain
+
+```
+llm.decide() called
+        │
+        ▼
+_ask_ollama()          ← Gemma 4 via Ollama (local / LAN)
+        │ success ──────────────────────────────► return action
+        │ any failure (connection refused,
+        │   bad JSON, invalid action field)
+        ▼
+_ask_gemini()          ← Gemini 2.5 Flash (cloud, optional)
+        │              only runs if GEMINI_API_KEY is set
+        │ success ──────────────────────────────► return action
+        │ failure
+        ▼
+{"action": "stop"}     ← safe default, logged at ERROR level
+```
+
+**Session management:** `reset_session(mode)` initialises both an Ollama messages list and a Gemini chat session simultaneously at boot and on every mode switch. If Gemini steps in mid-session it already has the correct system prompt and won't start cold.
+
+**Ollama location:** defaults to `http://localhost:11434`. Set `OLLAMA_BASE_URL` in `.env` to point at a remote machine — useful when running inference on a laptop while the Pi handles hardware.
+
+---
+
 ## Security
 
 - `.env` is in `.gitignore` and will never be committed
-- `config.py` uses `os.environ["GEMINI_API_KEY"]` — crashes immediately on startup if key is missing
+- `GEMINI_API_KEY` is optional — if absent, the fallback is silently disabled; the app does not crash
+- Gemma 4 runs entirely locally — no speech, camera descriptions, or sensor data leave the network
 - No API keys or audio content are written to `robot.log`
-- Sensor readings and Gemini responses are logged at DEBUG level only
+- Sensor readings and AI responses are logged at DEBUG level only
 
 ---
 
@@ -483,6 +523,9 @@ Face groups and their variants:
 
 - **gTTS requires internet** — swap for `pyttsx3` in `voice/tts.py` for offline operation
 - **Whisper STT has 1–2s delay** — after speaking stops, transcription takes time on Pi 4
+- **Gemma 4 is slow on Pi 4** — run Ollama on a separate machine and set `OLLAMA_BASE_URL` for real-time responses
+- **Gemma 4 may wrap JSON in markdown fences** — `brain/llm.py` strips these, but a model update could change the pattern
 - **MobileNet SSD is fixed at 20 classes** — cannot identify objects outside the trained set
-- **Gemini chat history is in-memory only** — resets on restart or mode switch
+- **Chat history is in-memory only** — resets on restart or mode switch
 - **Vision is frame-by-frame** — no continuous video stream; camera only samples during decision steps
+- **Gemini fallback requires `google-generativeai`** — not installed by default; `pip install google-generativeai` to enable it
