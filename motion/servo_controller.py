@@ -36,8 +36,8 @@ class _RealServoController:
         }
 
     def set_angle(self, joint_name: str, angle: float):
-        angle = max(config.SERVO_MIN_ANGLE,
-                    min(config.SERVO_MAX_ANGLE, angle))
+        lo, hi = config.SERVO_LIMITS.get(joint_name, (0, 180))
+        angle = max(lo, min(hi, angle))
         self.servos[joint_name].angle = angle
 
     def set_pose(self, pose: dict):

@@ -26,12 +26,22 @@ class GaitController:
         lift  = config.GAIT_LIFT_ANGLE
         delay = config.GAIT_STEP_DELAY
 
+        # Left and right hips are mirrored
+        is_left = "left" in leg
+        is_rear  = leg.startswith("rear")
+        offset = step if (is_left == (direction == "forward")) else -step
+
+        # Each knee has its own lift direction based on how the servo is mounted
+        # +lift: front_left (L2), rear_right (R4)
+        # -lift: front_right (R2), rear_left (L4)
+        flip_knee = (is_left and is_rear) or (not is_left and not is_rear)
+        knee_lift = -lift if flip_knee else lift
+
         # lift
-        self.sc.set_angle(knee, base_knee + lift)
+        self.sc.set_angle(knee, base_knee + knee_lift)
         time.sleep(delay)
 
         # swing
-        offset = step if direction == "forward" else -step
         self.sc.set_angle(hip, base_hip + offset)
         time.sleep(delay)
 
