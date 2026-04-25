@@ -3,9 +3,18 @@ import config
 import ollama
 from utils.logger import log
 
+# Gemini is optional — only imported/configured when an API key is present.
+_gemini_available = False
+if config.GEMINI_API_KEY:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=config.GEMINI_API_KEY)
+        _gemini_available = True
+    except ImportError:
+        log("google-generativeai not installed — Gemini fallback disabled", level="warn")
+
 # ---------------------------------------------------------------------------
 # Mode-specific system prompts
-# Each mode gives Gemma a different personality and set of priorities.
 # ---------------------------------------------------------------------------
 
 _BASE_RULES = """
@@ -71,35 +80,110 @@ You treat every deployment with life-or-death urgency. You are Cleo, and you wil
 }
 
 # ---------------------------------------------------------------------------
-# Conversation history
-# Ollama doesn't have a stateful session object — we maintain the messages
-# list ourselves.  Each entry is {"role": "system"|"user"|"assistant",
-# "content": "..."}.  reset_session() wipes it and sets a fresh system prompt.
+# Conversation history — one per backend so a fallback mid-session doesn't
+# lose context.  Ollama uses a messages list; Gemini uses its own session obj.
 # ---------------------------------------------------------------------------
 
-_messages: list[dict] = []
-_current_mode: str | None = None
+# Ollama state
+_ollama_messages: list[dict] = []
+_ollama_mode: str | None = None
+
+# Gemini fallback state
+_gemini_session = None
+_gemini_mode: str | None = None
 
 
-def _ensure_session(mode: str) -> None:
-    """Initialise (or re-initialise) the message history for the given mode."""
-    global _messages, _current_mode
+# ── helpers ────────────────────────────────────────────────────────────────
 
-    if _messages and mode == _current_mode:
-        return  # session already active for this mode
-
+def _ensure_ollama_session(mode: str) -> None:
+    global _ollama_messages, _ollama_mode
+    if _ollama_messages and mode == _ollama_mode:
+        return
     prompt = MODE_PROMPTS.get(mode, MODE_PROMPTS["general"])
-    _messages     = [{"role": "system", "content": prompt}]
-    _current_mode = mode
-    log(f"New chat session started — mode: {mode}", level="info")
+    _ollama_messages = [{"role": "system", "content": prompt}]
+    _ollama_mode     = mode
+    log(f"[Ollama] New session — mode: {mode}", level="info")
 
+
+def _ensure_gemini_session(mode: str) -> None:
+    global _gemini_session, _gemini_mode
+    if _gemini_session and mode == _gemini_mode:
+        return
+    prompt = MODE_PROMPTS.get(mode, MODE_PROMPTS["general"])
+    model  = genai.GenerativeModel(
+        model_name=config.GEMINI_MODEL,
+        system_instruction=prompt,
+    )
+    _gemini_session = model.start_chat(history=[])
+    _gemini_mode    = mode
+    log(f"[Gemini] New session — mode: {mode}", level="info")
+
+
+def _strip_fences(text: str) -> str:
+    """Remove accidental markdown code fences Gemma sometimes adds."""
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return text.strip()
+
+
+def _parse_action(raw: str) -> dict | None:
+    """Parse JSON and validate the action field. Returns None on failure."""
+    result = json.loads(raw)
+    if result.get("action") not in config.VALID_ACTIONS:
+        log(f"Invalid action '{result.get('action')}'", level="warn")
+        return None
+    return result
+
+
+# ── primary: Ollama / Gemma ────────────────────────────────────────────────
+
+def _ask_ollama(message: str, mode: str) -> dict:
+    _ensure_ollama_session(mode)
+    _ollama_messages.append({"role": "user", "content": message})
+
+    response = ollama.chat(model=config.LLM_MODEL, messages=_ollama_messages)
+    raw      = _strip_fences(response.message.content)
+    log(f"← Gemma | {raw}", level="debug")
+
+    result = _parse_action(raw)
+    if result is None:
+        _ollama_messages.pop()   # discard bad turn
+        raise ValueError(f"Invalid action in response: {raw!r}")
+
+    _ollama_messages.append({"role": "assistant", "content": raw})
+    return result
+
+
+# ── fallback: Gemini ───────────────────────────────────────────────────────
+
+def _ask_gemini(message: str, mode: str) -> dict:
+    _ensure_gemini_session(mode)
+
+    response = _gemini_session.send_message(message)
+    raw      = response.text.strip()
+    log(f"← Gemini | {raw}", level="debug")
+
+    result = _parse_action(raw)
+    if result is None:
+        raise ValueError(f"Invalid action in response: {raw!r}")
+
+    return result
+
+
+# ── public API ─────────────────────────────────────────────────────────────
 
 def reset_session(mode: str) -> None:
-    """Force a fresh conversation (call this when the robot switches modes)."""
-    global _messages, _current_mode
-    _messages     = []
-    _current_mode = None
-    _ensure_session(mode)
+    """Force a fresh conversation on both backends (call on mode switch)."""
+    global _ollama_messages, _ollama_mode, _gemini_session, _gemini_mode
+    _ollama_messages = []
+    _ollama_mode     = None
+    _gemini_session  = None
+    _gemini_mode     = None
+    _ensure_ollama_session(mode)
+    if _gemini_available:
+        _ensure_gemini_session(mode)
 
 
 def decide(
@@ -109,18 +193,16 @@ def decide(
     sensor_data: dict | None = None,
 ) -> dict:
     """
-    Send the current situation to Gemma (via Ollama) and get back a JSON action.
+    Ask Gemma 4 (Ollama) for an action.  Falls back to Gemini automatically
+    if Ollama is unreachable, returns an error, or produces invalid JSON.
 
     Parameters
     ----------
     user_input  : What the user just said (mission or conversational text).
     detections  : List of vision detections, each with 'label' and 'position'.
     mode        : Current robot mode (general / security / environment / search_rescue).
-    sensor_data : Optional dict with live sensor readings, e.g.
-                  {"motion_detected": True, "temperature": 24.5, "humidity": 55.0}
+    sensor_data : Optional dict — {"motion_detected": bool, "temperature": float, ...}
     """
-    _ensure_session(mode)
-
     detection_str = (
         ", ".join(f"{d['label']} ({d['position']})" for d in detections)
         or "nothing detected"
@@ -144,43 +226,26 @@ def decide(
         f"{sensor_lines}"
     )
 
-    log(f"→ Gemma | {message.replace(chr(10), ' | ')}", level="debug")
+    log(f"→ LLM | {message.replace(chr(10), ' | ')}", level="debug")
 
-    _messages.append({"role": "user", "content": message})
-
-    raw = ""
+    # ── try Gemma 4 first ──────────────────────────────────────────────────
     try:
-        response = ollama.chat(
-            model=config.LLM_MODEL,
-            messages=_messages,
-        )
-        raw = response.message.content.strip()
-        log(f"← Gemma | {raw}", level="debug")
-
-        # Strip accidental markdown fences (```json ... ```)
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        result = json.loads(raw)
-
-        if result.get("action") not in config.VALID_ACTIONS:
-            log(f"Invalid action '{result.get('action')}' — defaulting to stop", level="warn")
-            _messages.append({"role": "assistant", "content": raw})
-            return {"action": "stop"}
-
-        # Keep assistant turn in history
-        _messages.append({"role": "assistant", "content": raw})
-        return result
-
-    except json.JSONDecodeError:
-        log(f"JSON parse failed on: {raw!r}", level="warn")
-        _messages.append({"role": "assistant", "content": raw})
-        return {"action": "stop"}
+        return _ask_ollama(message, mode)
+    except json.JSONDecodeError as e:
+        log(f"[Ollama] JSON parse failed: {e}", level="warn")
     except Exception as e:
-        log(f"Gemma/Ollama error: {e}", level="error")
-        # Don't append a failed turn — keep history clean
-        _messages.pop()  # remove the user message we just added
-        return {"action": "stop"}
+        log(f"[Ollama] error: {e}", level="warn")
+
+    # ── fall back to Gemini ────────────────────────────────────────────────
+    if _gemini_available:
+        log("Falling back to Gemini...", level="warn")
+        try:
+            return _ask_gemini(message, mode)
+        except json.JSONDecodeError as e:
+            log(f"[Gemini] JSON parse failed: {e}", level="warn")
+        except Exception as e:
+            log(f"[Gemini] error: {e}", level="error")
+    else:
+        log("Gemini fallback unavailable (no API key or package missing)", level="error")
+
+    return {"action": "stop"}

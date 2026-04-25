@@ -62,9 +62,11 @@ DETECTION_PROTOTXT = "models/MobileNetSSD_deploy.prototxt"
 DETECTION_CONFIDENCE_THRESHOLD = 0.5
 
 # --- LLM ---
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-LLM_MODEL       = os.environ.get("CLEO_MODEL", "gemma4")
-VALID_ACTIONS   = [
+OLLAMA_BASE_URL  = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+LLM_MODEL        = os.environ.get("CLEO_MODEL", "gemma4")
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY")   # optional — used as fallback if Ollama fails
+GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+VALID_ACTIONS    = [
     "walk_forward", "turn_left", "turn_right",
     "stop", "complete", "speak", "set_mode",
 ]
