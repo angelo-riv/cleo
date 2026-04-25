@@ -62,9 +62,9 @@ DETECTION_PROTOTXT = "models/MobileNetSSD_deploy.prototxt"
 DETECTION_CONFIDENCE_THRESHOLD = 0.5
 
 # --- LLM ---
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]   # must be set in .env
-LLM_MODEL      = "gemini-2.5-flash"
-VALID_ACTIONS  = [
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+LLM_MODEL       = os.environ.get("CLEO_MODEL", "gemma4")
+VALID_ACTIONS   = [
     "walk_forward", "turn_left", "turn_right",
     "stop", "complete", "speak", "set_mode",
 ]
