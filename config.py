@@ -68,8 +68,13 @@ CAMERA_RESOLUTION  = (640, 480)
 DETECTION_CONFIDENCE_THRESHOLD = 0.4
 
 # --- LLM ---
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]   # must be set in .env
-LLM_MODEL      = "gemini-2.5-flash"
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+# Primary LLM (Ollama) model name. Example: "gemma4"
+LLM_MODEL       = os.environ.get("CLEO_MODEL", "gemma4")
+
+# Optional fallback LLM (Gemini)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MISSION_MAX_STEPS = 10   # max steps before giving up on a mission
 
 VALID_ACTIONS  = [

@@ -1,11 +1,13 @@
 import json
+import urllib.request
+import urllib.error
 import config
-import google.generativeai as genai
 from utils.logger import log
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Mode-specific system prompts
-# Each mode gives Gemini a different personality and set of priorities.
+# Each mode gives the LLM a different personality and set of priorities.
 # ---------------------------------------------------------------------------
 
 _BASE_RULES = """
@@ -74,39 +76,113 @@ You treat every deployment with life-or-death urgency. You are Cleo, and you wil
 
 # ---------------------------------------------------------------------------
 # Chat session management
-# A single persistent Gemini chat session is kept alive per mode so that
-# Gemini has full conversation history throughout the session.
+# We keep per-mode conversational state for:
+# - Ollama (primary): messages list
+# - Gemini (fallback): chat session
 # ---------------------------------------------------------------------------
 
-genai.configure(api_key=config.GEMINI_API_KEY)
+# Gemini is optional: only import/configure if installed and API key is provided.
+_GENAI_AVAILABLE = False
+try:
+    import google.generativeai as genai  # type: ignore
 
-_chat_session = None
-_current_mode = None
+    if getattr(config, "GEMINI_API_KEY", ""):
+        genai.configure(api_key=config.GEMINI_API_KEY)
+        _GENAI_AVAILABLE = True
+except Exception:
+    _GENAI_AVAILABLE = False
+
+_gemini_chat_session = None
+_gemini_mode = None
+
+_ollama_messages = None
+_ollama_mode = None
 
 
-def _get_or_create_session(mode: str):
-    """Return the active chat session, creating a new one if mode changed."""
-    global _chat_session, _current_mode
+def _strip_json_fences(text: str) -> str:
+    """
+    Some models occasionally wrap JSON in markdown fences.
+    Keep this forgiving to improve robustness.
+    """
+    t = text.strip()
+    if t.startswith("```"):
+        # remove leading fence line
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        # remove trailing fence
+        t = t.rsplit("```", 1)[0].strip()
+    return t.strip()
 
-    if _chat_session is None or mode != _current_mode:
+
+def _ollama_chat(prompt: str, mode: str) -> str:
+    """
+    Send one message to Ollama's /api/chat endpoint, maintaining conversation history.
+    Returns raw assistant text.
+    """
+    global _ollama_messages, _ollama_mode
+
+    if _ollama_messages is None or mode != _ollama_mode:
+        system_prompt = MODE_PROMPTS.get(mode, MODE_PROMPTS["general"])
+        _ollama_messages = [{"role": "system", "content": system_prompt}]
+        _ollama_mode = mode
+        log(f"Ollama session reset — mode: {mode}", level="info")
+
+    _ollama_messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": config.LLM_MODEL,
+        "messages": _ollama_messages,
+        "stream": False,
+    }
+
+    url = config.OLLAMA_BASE_URL.rstrip("/") + "/api/chat"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        out = json.loads(body)
+
+    # Persist assistant message in history if present
+    msg = out.get("message", {}) if isinstance(out, dict) else {}
+    content = msg.get("content", "")
+    if content:
+        _ollama_messages.append({"role": "assistant", "content": content})
+    return (content or "").strip()
+
+
+def _get_or_create_gemini_session(mode: str):
+    """Return the active Gemini chat session, creating a new one if mode changed."""
+    global _gemini_chat_session, _gemini_mode
+
+    if not _GENAI_AVAILABLE:
+        return None
+
+    if _gemini_chat_session is None or mode != _gemini_mode:
         prompt = MODE_PROMPTS.get(mode, MODE_PROMPTS["general"])
-        model  = genai.GenerativeModel(
-            model_name=config.LLM_MODEL,
+        model = genai.GenerativeModel(
+            model_name=config.GEMINI_MODEL,
             system_instruction=prompt,
         )
-        _chat_session  = model.start_chat(history=[])
-        _current_mode  = mode
-        log(f"New chat session started — mode: {mode}", level="info")
+        _gemini_chat_session = model.start_chat(history=[])
+        _gemini_mode = mode
+        log(f"Gemini session started — mode: {mode}", level="info")
 
-    return _chat_session
+    return _gemini_chat_session
 
 
 def reset_session(mode: str):
-    """Force a fresh chat session (call this when the robot switches modes)."""
-    global _chat_session, _current_mode
-    _chat_session = None
-    _current_mode = None
-    _get_or_create_session(mode)
+    """Force fresh state for both Ollama + Gemini (call when robot switches modes)."""
+    global _gemini_chat_session, _gemini_mode, _ollama_messages, _ollama_mode
+    _gemini_chat_session = None
+    _gemini_mode = None
+    _ollama_messages = None
+    _ollama_mode = None
+    # warm up the current mode lazily on first decide()
 
 
 def decide(
@@ -126,8 +202,6 @@ def decide(
     sensor_data : Optional dict with live sensor readings, e.g.
                   {"motion_detected": True, "temperature": 24.5, "humidity": 55.0}
     """
-    session = _get_or_create_session(mode)
-
     detection_str = (
         ", ".join(f"{d['label']} ({d['position']})" for d in detections)
         or "nothing detected"
@@ -151,20 +225,42 @@ def decide(
         f"{sensor_lines}"
     )
 
-    log(f"→ Gemini | {message.replace(chr(10), ' | ')}", level="debug")
-
     try:
-        response = session.send_message(message)
-        raw      = response.text.strip()
-        log(f"← Gemini | {raw}", level="debug")
-        result   = json.loads(raw)
+        # ------------------------------------------------------------------
+        # Primary: Ollama (Gemma 4)
+        # ------------------------------------------------------------------
+        log(f"→ Ollama | {message.replace(chr(10), ' | ')}", level="debug")
+        raw = _ollama_chat(message, mode)
+        raw = _strip_json_fences(raw)
+        log(f"← Ollama | {raw}", level="debug")
+        result = json.loads(raw)
         if result.get("action") not in config.VALID_ACTIONS:
             log(f"Invalid action '{result.get('action')}' — defaulting to stop", level="warn")
             return {"action": "stop"}
         return result
     except json.JSONDecodeError:
-        log(f"JSON parse failed on: {raw!r}", level="warn")
+        log(f"Ollama JSON parse failed on: {raw!r}", level="warn")
+    except Exception as e:
+        log(f"Ollama error: {e}", level="error")
+
+    # ----------------------------------------------------------------------
+    # Fallback: Gemini (optional)
+    # ----------------------------------------------------------------------
+    session = _get_or_create_gemini_session(mode)
+    if session is None:
         return {"action": "stop"}
+
+    try:
+        log(f"→ Gemini | {message.replace(chr(10), ' | ')}", level="debug")
+        response = session.send_message(message)
+        raw = (response.text or "").strip()
+        raw = _strip_json_fences(raw)
+        log(f"← Gemini | {raw}", level="debug")
+        result = json.loads(raw)
+        if result.get("action") not in config.VALID_ACTIONS:
+            log(f"Invalid action '{result.get('action')}' — defaulting to stop", level="warn")
+            return {"action": "stop"}
+        return result
     except Exception as e:
         log(f"Gemini error: {e}", level="error")
         return {"action": "stop"}

@@ -175,17 +175,23 @@ Verify it works:
 ssh -T git@github.com
 ```
 
-### 6. Add your API key
+### 6. Configure `.env` (Gemma 4 primary, Gemini optional fallback)
 
 ```bash
 nano .env
 ```
 
 ```
-GEMINI_API_KEY=your_actual_key_here
+# Primary (Ollama / Gemma 4)
+CLEO_MODEL=gemma4
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Optional fallback (Gemini) — only used if Ollama fails
+# GEMINI_API_KEY=your_actual_key_here
+# GEMINI_MODEL=gemini-2.5-flash
 ```
 
-Get a free key at [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey). Save with `Ctrl+X` → `Y` → `Enter`.
+If you want the Gemini fallback, get a free key at [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey). Save with `Ctrl+X` → `Y` → `Enter`.
 
 ### 7. Create a virtual environment and install dependencies
 
@@ -209,9 +215,14 @@ pip install \
   sounddevice \
   gTTS \
   pygame \
-  google-generativeai \
   python-dotenv \
   RPi.GPIO
+```
+
+To enable the optional Gemini fallback:
+
+```bash
+pip install google-generativeai
 ```
 
 > You must run `source venv/bin/activate` at the start of every new SSH session before running the robot.
@@ -339,7 +350,11 @@ Open `config.py` and set:
 ```python
 MOCK_SERVOS = True      # skips all I2C/servo/GPIO hardware
 SHOW_CAMERA_FEED = False  # no display window (required when running over SSH)
-LLM_MODEL = "gemini-2.5-flash"  # 2.0-flash has no free tier quota
+CLEO_MODEL = "gemma4"
+OLLAMA_BASE_URL = "http://localhost:11434"
+# Optional fallback:
+# GEMINI_API_KEY = "..."
+# GEMINI_MODEL = "gemini-2.5-flash"
 ```
 
 ### 5. Test audio
@@ -429,7 +444,7 @@ python3 manual_control.py
 | `F` | Cycle the OLED to a random happy face |
 | `Q` or `ESC` | Quit cleanly |
 
-The camera window overlays the current mode, last action, last Gemini response, and live sensor readings directly on the feed.
+The camera window overlays the current mode, last action, last LLM response, and live sensor readings directly on the feed.
 
 ---
 
@@ -437,8 +452,10 @@ The camera window overlays the current mode, last action, last Gemini response, 
 
 | Setting | What it controls | Default |
 |---|---|---|
-| `GEMINI_API_KEY` | Loaded from `.env` | — |
-| `LLM_MODEL` | Gemini model | `gemini-2.5-flash` |
+| `OLLAMA_BASE_URL` | Ollama server URL (primary LLM) | `http://localhost:11434` |
+| `CLEO_MODEL` | Ollama model name (primary LLM) | `gemma4` |
+| `GEMINI_API_KEY` | Enables Gemini fallback if set | *(blank)* |
+| `GEMINI_MODEL` | Gemini model used for fallback | `gemini-2.5-flash` |
 | `WHISPER_MODEL` | STT model size | `tiny.en` |
 | `MIC_DEVICE_INDEX` | USB mic card number (`None` = auto) | `None` |
 | `CAMERA_RESOLUTION` | Capture resolution | `(640, 480)` |
@@ -458,7 +475,7 @@ The camera window overlays the current mode, last action, last Gemini response, 
 ## Security Notes
 
 - `.env` is in `.gitignore` — it will never be committed
-- The app crashes immediately at startup if `GEMINI_API_KEY` is missing — no silent failures
+- Gemini fallback is optional — if `GEMINI_API_KEY` is missing, the robot still runs (Gemma 4 via Ollama only)
 - Never paste your API key into chat, issues, or log files
 - `robot.log` does not record API keys or audio transcripts
 
@@ -469,6 +486,5 @@ The camera window overlays the current mode, last action, last Gemini response, 
 - **gTTS needs internet** — for fully offline TTS, swap `gTTS` for `pyttsx3` in `voice/tts.py`
 - **Whisper has a 1–2s delay** — after you stop speaking, transcription takes a moment on Pi 4
 - **MobileNet SSD recognises 20 object classes only** — it cannot identify objects outside that list
-- **Gemini chat history is in-memory** — resets on restart or mode change
-- **Gemini 2.0 Flash has no free tier quota** — use `gemini-2.5-flash` in `config.py`
+- **LLM chat history is in-memory** — resets on restart or mode change
 - **`SHOW_CAMERA_FEED = True` crashes over SSH** — set it to `False` when running headless
