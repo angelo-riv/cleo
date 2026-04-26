@@ -1,8 +1,6 @@
-# Quadruped Robot — Cleo
+# Quadruped Robot
 
-An autonomous 4-legged robot powered by a Raspberry Pi and a local Gemma 4 AI brain. Speak to it, give it missions, and it walks, looks, thinks, and talks back. Supports multiple AI personality modes switchable by voice at any time.
-
-Gemma 4 runs locally via [Ollama](https://ollama.com) — no cloud required. Google Gemini is available as an optional fallback if Ollama is unreachable.
+An autonomous 4-legged robot powered by a Raspberry Pi and Google Gemini AI. Speak to it, give it missions, and it walks, looks, thinks, and talks back. Supports multiple AI personality modes switchable by voice at any time.
 
 > For full software architecture, data flows, and code documentation see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -11,8 +9,7 @@ Gemma 4 runs locally via [Ollama](https://ollama.com) — no cloud required. Goo
 ## Features
 
 - **Voice control** — speak naturally to give missions or have a conversation
-- **AI brain** — Gemma 4 (local) decides every action based on what you say and what the camera sees
-- **Gemini fallback** — automatically switches to Gemini if Ollama fails, then recovers
+- **AI brain** — Google Gemini decides every action based on what you say and what the camera sees
 - **Object detection** — camera identifies 20 object types and their position (left / center / right)
 - **Walking** — creep gait using 8 servo motors across 4 legs
 - **Expressive face** — OLED display shows animated faces that change based on what the robot is doing
@@ -27,10 +24,9 @@ Gemma 4 runs locally via [Ollama](https://ollama.com) — no cloud required. Goo
 | Technology | What it does in this project |
 |---|---|
 | **Python 3** | Entire codebase |
-| **Gemma 4 (via Ollama)** | Primary AI decision engine — runs fully locally, no API key or internet needed |
-| **Google Gemini 2.5 Flash** | Optional fallback AI — activates automatically if Ollama is unavailable |
+| **Google Gemini 2.5 Flash** | AI decision engine — receives text descriptions of what the robot sees and returns the next action as JSON |
 | **faster-whisper (Whisper tiny.en)** | Speech-to-text — runs fully offline on the Pi, no API key needed |
-| **gTTS (Google Text-to-Speech)** | Text-to-speech — converts AI responses to audio, requires internet |
+| **gTTS (Google Text-to-Speech)** | Text-to-speech — converts Gemini's responses to audio, requires internet |
 | **MobileNet SSD (OpenCV DNN)** | Object detection — runs locally on the Pi, identifies objects in camera frames |
 | **USB Webcam or Pi Camera** | Captures frames for object detection |
 | **PCA9685 PWM driver** | Controls all 8 servo motors over I2C |
@@ -38,7 +34,7 @@ Gemma 4 runs locally via [Ollama](https://ollama.com) — no cloud required. Goo
 | **Adafruit CircuitPython** | Servo motor and DHT11 sensor drivers |
 | **sounddevice** | Records microphone audio |
 | **pygame** | Plays TTS audio through the speaker |
-| **python-dotenv** | Loads configuration securely from `.env` |
+| **python-dotenv** | Loads API keys securely from `.env` |
 
 ---
 
@@ -81,7 +77,7 @@ The robot scans for attached sensor modules at boot and starts in the matching m
 | `environment` | DHT11 on I2C `0x44` | Environmental monitor, flags temp/humidity anomalies |
 | `search_rescue` | Voice command only | Emergency responder, systematic people-search |
 
-**To switch by voice** — say it naturally, the AI understands intent:
+**To switch by voice** — say it naturally, Gemini understands intent:
 - *"Switch to search and rescue mode"*
 - *"Go into security mode"*
 - *"Back to general mode"*
@@ -95,7 +91,7 @@ The display shows animated bitmap faces. Each state has multiple variants that c
 | State | Variants | When shown |
 |---|---|---|
 | `idle` | Open eyes, half-asleep, mid-blink | Waiting for input |
-| `thinking` | Squinted, looking sideways, looking up | AI is processing |
+| `thinking` | Squinted, looking sideways, looking up | Gemini is processing |
 | `searching` | One-eye squint, both-eyes-wide alert | On a mission |
 | `happy` | Standard smile, wink, huge eyes, star eyes, excited | Mission complete |
 | `surprised` | Wide O-eyes + hollow O-mouth | Triggered manually |
@@ -108,8 +104,6 @@ There are two setup paths depending on what hardware you have available:
 
 - **[Full setup](#full-setup)** — complete robot with servos, OLED, and sensors
 - **[Camera / mic / speaker only](#cameramicspeaker-only-setup)** — test voice and vision without any I2C hardware
-
-Ollama can run on the Pi itself or on a separate machine on the same network (recommended for better performance — see [Ollama on a separate machine](#ollama-on-a-separate-machine)).
 
 ---
 
@@ -181,43 +175,19 @@ Verify it works:
 ssh -T git@github.com
 ```
 
-### 6. Install Ollama and pull Gemma 4
-
-Install Ollama on the machine that will run inference (the Pi, or a separate computer — see note below):
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull gemma4
-```
-
-Verify it works:
-
-```bash
-ollama run gemma4 "Reply with only valid JSON: {\"action\": \"speak\", \"text\": \"hello\"}"
-```
-
-> **Pi 4 note:** Gemma 4 runs on a Pi 4 but responses will take several seconds. For faster inference, run Ollama on a laptop or desktop on the same network and set `OLLAMA_BASE_URL` in `.env` to point at it (e.g. `http://192.168.1.10:11434`). See [Ollama on a separate machine](#ollama-on-a-separate-machine).
-
-### 7. Configure `.env`
+### 6. Add your API key
 
 ```bash
 nano .env
 ```
 
-Minimum config (Gemma 4 only, no fallback):
 ```
-CLEO_MODEL=gemma4
-```
-
-With Gemini fallback enabled:
-```
-CLEO_MODEL=gemma4
-GEMINI_API_KEY=your_key_here
+GEMINI_API_KEY=your_actual_key_here
 ```
 
-Get a free Gemini key at [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey). Save with `Ctrl+X` → `Y` → `Enter`.
+Get a free key at [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey). Save with `Ctrl+X` → `Y` → `Enter`.
 
-### 8. Create a virtual environment and install dependencies
+### 7. Create a virtual environment and install dependencies
 
 Raspberry Pi OS Trixie requires a venv — do not skip this:
 
@@ -239,20 +209,14 @@ pip install \
   sounddevice \
   gTTS \
   pygame \
-  ollama \
+  google-generativeai \
   python-dotenv \
   RPi.GPIO
 ```
 
-To also enable the Gemini fallback:
-
-```bash
-pip install google-generativeai
-```
-
 > You must run `source venv/bin/activate` at the start of every new SSH session before running the robot.
 
-### 9. Download the vision model
+### 8. Download the vision model
 
 ```bash
 mkdir -p models
@@ -273,7 +237,7 @@ ls -lh models/
 # prototxt should be ~29K, caffemodel should be ~23M
 ```
 
-### 10. Test audio
+### 9. Test audio
 
 ```bash
 arecord -l    # list recording devices
@@ -299,7 +263,7 @@ defaults.ctl.card <speaker-card>
 
 If the wrong mic is selected, set `MIC_DEVICE_INDEX` in `config.py` to the correct card number.
 
-### 11. Run
+### 10. Run
 
 ```bash
 python3 main.py
@@ -307,7 +271,7 @@ python3 main.py
 
 The robot stands up and says "I'm listening."
 
-### 12. Auto-start on boot *(optional)*
+### 11. Auto-start on boot *(optional)*
 
 ```bash
 sudo nano /etc/rc.local
@@ -327,7 +291,7 @@ Use this path to test voice and vision without any I2C hardware (no servo driver
 
 ### 1. Flash, SSH, and get the project
 
-Follow steps 1–7 from [Full Setup](#full-setup) above (flash OS, SSH in, get the project, install Ollama, configure `.env`). Skip the raspi-config I2C step.
+Follow steps 1–6 from [Full Setup](#full-setup) above (flash OS, SSH in, get the project, add API key). Skip the raspi-config I2C step.
 
 ### 2. Create a virtual environment and install dependencies
 
@@ -346,7 +310,7 @@ pip install \
   sounddevice \
   gTTS \
   pygame \
-  ollama \
+  google-generativeai \
   python-dotenv
 ```
 
@@ -373,8 +337,9 @@ ls -lh models/
 Open `config.py` and set:
 
 ```python
-MOCK_SERVOS = True        # skips all I2C/servo/GPIO hardware
+MOCK_SERVOS = True      # skips all I2C/servo/GPIO hardware
 SHOW_CAMERA_FEED = False  # no display window (required when running over SSH)
+LLM_MODEL = "gemini-2.5-flash"  # 2.0-flash has no free tier quota
 ```
 
 ### 5. Test audio
@@ -434,29 +399,7 @@ cam.release()
 python3 main.py
 ```
 
-Servo and OLED commands will print as `[MOCK]` lines. Everything else (voice, camera, AI) runs for real.
-
----
-
-## Ollama on a Separate Machine
-
-If the Pi is too slow for comfortable inference, run Ollama on a laptop or desktop on the same network and point Cleo at it.
-
-**On the host machine:**
-
-```bash
-# Start Ollama listening on all interfaces (not just localhost)
-OLLAMA_HOST=0.0.0.0 ollama serve
-```
-
-**In Cleo's `.env`:**
-
-```
-OLLAMA_BASE_URL=http://<host-ip>:11434
-CLEO_MODEL=gemma4
-```
-
-Replace `<host-ip>` with the host machine's local IP (e.g. `192.168.1.10`). The Pi will send inference requests over the network — same Gemma 4 model, much faster responses.
+Servo and OLED commands will print as `[MOCK]` lines. Everything else (voice, camera, Gemini) runs for real.
 
 ---
 
@@ -478,7 +421,7 @@ python3 manual_control.py
 | `A` | Turn left |
 | `D` | Turn right |
 | `S` | Stand / stop |
-| `SPACE` | Ask the AI what it currently sees — speaks the answer aloud and shows it on screen |
+| `SPACE` | Ask Gemini what it currently sees — speaks the answer aloud and shows it on screen |
 | `1` | Switch to General mode |
 | `2` | Switch to Security mode |
 | `3` | Switch to Environment mode |
@@ -486,7 +429,7 @@ python3 manual_control.py
 | `F` | Cycle the OLED to a random happy face |
 | `Q` or `ESC` | Quit cleanly |
 
-The camera window overlays the current mode, last action, last AI response, and live sensor readings directly on the feed.
+The camera window overlays the current mode, last action, last Gemini response, and live sensor readings directly on the feed.
 
 ---
 
@@ -494,16 +437,14 @@ The camera window overlays the current mode, last action, last AI response, and 
 
 | Setting | What it controls | Default |
 |---|---|---|
-| `CLEO_MODEL` | Ollama model name (set in `.env`) | `gemma4` |
-| `OLLAMA_BASE_URL` | Ollama server URL (set in `.env`) | `http://localhost:11434` |
-| `GEMINI_API_KEY` | Gemini fallback key — leave blank to disable (set in `.env`) | *(blank)* |
-| `GEMINI_MODEL` | Gemini model used for fallback (set in `.env`) | `gemini-2.5-flash` |
+| `GEMINI_API_KEY` | Loaded from `.env` | — |
+| `LLM_MODEL` | Gemini model | `gemini-2.5-flash` |
 | `WHISPER_MODEL` | STT model size | `tiny.en` |
 | `MIC_DEVICE_INDEX` | USB mic card number (`None` = auto) | `None` |
 | `CAMERA_RESOLUTION` | Capture resolution | `(640, 480)` |
 | `DETECTION_CONFIDENCE_THRESHOLD` | Min confidence to report an object | `0.5` |
-| `SHOW_CAMERA_FEED` | Show annotated feed on monitor (disable over SSH) | `False` |
-| `MOCK_SERVOS` | Skip all I2C/servo/GPIO hardware | `True` |
+| `SHOW_CAMERA_FEED` | Show annotated feed on monitor (disable over SSH) | `True` |
+| `MOCK_SERVOS` | Skip all I2C/servo/GPIO hardware | `False` |
 | `GAIT_STEP_ANGLE` | Hip swing per step (degrees) | `20` |
 | `GAIT_LIFT_ANGLE` | Knee lift per step (degrees) | `30` |
 | `GAIT_STEP_DELAY` | Pause between gait phases (seconds) | `0.15` |
@@ -517,9 +458,8 @@ The camera window overlays the current mode, last action, last AI response, and 
 ## Security Notes
 
 - `.env` is in `.gitignore` — it will never be committed
-- Gemma 4 runs entirely locally — no speech, sensor data, or commands leave your network
-- `GEMINI_API_KEY` is optional and defaults to blank — if absent, Gemini fallback is silently disabled
-- Never paste API keys into chat, issues, or log files
+- The app crashes immediately at startup if `GEMINI_API_KEY` is missing — no silent failures
+- Never paste your API key into chat, issues, or log files
 - `robot.log` does not record API keys or audio transcripts
 
 ---
@@ -528,8 +468,7 @@ The camera window overlays the current mode, last action, last AI response, and 
 
 - **gTTS needs internet** — for fully offline TTS, swap `gTTS` for `pyttsx3` in `voice/tts.py`
 - **Whisper has a 1–2s delay** — after you stop speaking, transcription takes a moment on Pi 4
-- **Gemma 4 on Pi 4 is slow** — run Ollama on a separate machine for real-time feel
 - **MobileNet SSD recognises 20 object classes only** — it cannot identify objects outside that list
-- **Chat history is in-memory** — resets on restart or mode change
+- **Gemini chat history is in-memory** — resets on restart or mode change
+- **Gemini 2.0 Flash has no free tier quota** — use `gemini-2.5-flash` in `config.py`
 - **`SHOW_CAMERA_FEED = True` crashes over SSH** — set it to `False` when running headless
-- **Gemini fallback requires `google-generativeai`** — install it separately if you want the fallback
