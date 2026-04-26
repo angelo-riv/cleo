@@ -11,7 +11,7 @@ from display.faces import (
     thinking, thinking_sideways, thinking_up,
     searching, searching_alert,
     happy, happy_wink, happy_big, happy_star, excited,
-    surprised,
+    surprised, tongue_out,
 )
 
 # ---------------------------------------------------------------------------
@@ -19,45 +19,48 @@ from display.faces import (
 # ---------------------------------------------------------------------------
 
 FACE_GROUPS = {
-    "idle":      [idle, idle_sleepy, idle_blink],
-    "thinking":  [thinking, thinking_sideways, thinking_up],
-    "searching": [searching, searching_alert],
-    "happy":     [happy, happy_wink, happy_big, happy_star, excited],
-    "surprised": [surprised],
+    "idle":       [idle, idle_sleepy, idle_blink],
+    "thinking":   [thinking, thinking_sideways, thinking_up],
+    "searching":  [searching, searching_alert],
+    "happy":      [happy, happy_wink, happy_big, happy_star, excited],
+    "excited":    [excited],
+    "surprised":  [surprised],
+    "tongue_out": [tongue_out],
 }
 
 _last_shown: dict = {}
 
 # ---------------------------------------------------------------------------
 # Idle animation frames
-# Eyes shifted left, right, and centre for glancing
 # ---------------------------------------------------------------------------
 
 _IDLE_OPEN = [
-    (20, 18, 44, 42),   # left eye
-    (84, 18, 108, 42),  # right eye
-    (44, 52, 84, 56),   # mouth
+    (20, 18, 44, 42),
+    (84, 18, 108, 42),
+    (44, 52, 84, 56),
 ]
 _IDLE_BLINK = [
-    (20, 28, 44, 33),   # left eye slit
-    (84, 28, 108, 33),  # right eye slit
+    (20, 28, 44, 33),
+    (84, 28, 108, 33),
     (44, 52, 84, 56),
 ]
 _IDLE_HALF_BLINK = [
-    (20, 24, 44, 36),   # left eye half
-    (84, 24, 108, 36),  # right eye half
+    (20, 24, 44, 36),
+    (84, 24, 108, 36),
     (44, 52, 84, 56),
 ]
 _IDLE_LOOK_LEFT = [
-    (12, 18, 36, 42),   # left eye shifted left
-    (76, 18, 100, 42),  # right eye shifted left
+    (12, 18, 36, 42),
+    (76, 18, 100, 42),
     (44, 52, 84, 56),
 ]
 _IDLE_LOOK_RIGHT = [
-    (28, 18, 52, 42),   # left eye shifted right
-    (92, 18, 116, 42),  # right eye shifted right
+    (28, 18, 52, 42),
+    (92, 18, 116, 42),
     (44, 52, 84, 56),
 ]
+
+_HAPPY_VARIANTS = [happy, happy_wink, happy_big, happy_star, excited, surprised]
 
 
 class OLEDDisplay:
@@ -68,30 +71,27 @@ class OLEDDisplay:
             serial = i2c(port=config.I2C_BUS, address=config.OLED_I2C_ADDRESS)
             self.device = sh1106(serial) if config.OLED_DRIVER == "sh1106" else ssd1306(serial)
 
-        self._current_face  = None
-        self._anim_stop     = threading.Event()
-        self._anim_thread   = None
+        self._current_face = None
+        self._anim_stop    = threading.Event()
+        self._anim_thread  = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def show(self, face: str):
-        """
-        Display a face state. If face is 'idle', starts the live idle
-        animation (blinking + glancing). Any other state stops the animation
-        and shows a static face variant.
-        """
         if face == self._current_face:
-            return  # already showing this — no flicker
+            return
 
         self._current_face = face
         self._stop_animation()
 
         if face == "idle":
             self._start_idle_animation()
+        elif face == "happy":
+            self._start_happy_animation()
         else:
-            group   = FACE_GROUPS.get(face, FACE_GROUPS["idle"])
+            group   = FACE_GROUPS.get(face, FACE_GROUPS["happy"])
             last    = _last_shown.get(face)
             choices = [f for f in group if f is not last] if len(group) > 1 else group
             variant = random.choice(choices)
@@ -103,7 +103,6 @@ class OLEDDisplay:
                 self._render(variant.BITMAP)
 
     def show_text(self, text: str):
-        """Display a short text string instead of a face."""
         self._stop_animation()
         self._current_face = None
         if config.MOCK_SERVOS:
@@ -115,12 +114,17 @@ class OLEDDisplay:
         self.device.display(img)
 
     # ------------------------------------------------------------------
-    # Idle animation
+    # Animations
     # ------------------------------------------------------------------
 
     def _start_idle_animation(self):
         self._anim_stop.clear()
         self._anim_thread = threading.Thread(target=self._idle_loop, daemon=True)
+        self._anim_thread.start()
+
+    def _start_happy_animation(self):
+        self._anim_stop.clear()
+        self._anim_thread = threading.Thread(target=self._happy_loop, daemon=True)
         self._anim_thread.start()
 
     def _stop_animation(self):
@@ -130,26 +134,30 @@ class OLEDDisplay:
         self._anim_thread = None
 
     def _idle_loop(self):
-        """
-        Runs in a background thread while face == 'idle'.
-        Randomly blinks every 3-5 seconds and occasionally glances left or right.
-        """
         while not self._anim_stop.is_set():
-            # Hold open eyes for 3–5 seconds
             wait = random.uniform(3.0, 5.0)
             if self._anim_stop.wait(timeout=wait):
                 break
-
-            # Occasionally glance instead of blink (25% chance)
             if random.random() < 0.25:
                 self._glance()
             else:
                 self._blink()
 
-        # Clear display when done (other face will redraw)
+    def _happy_loop(self):
+        """Cycles through happy face variants every 1.5–3 seconds."""
+        last = None
+        while not self._anim_stop.is_set():
+            choices = [f for f in _HAPPY_VARIANTS if f is not last]
+            variant = random.choice(choices)
+            last = variant
+            if config.MOCK_SERVOS:
+                print(f"[MOCK] OLED happy cycle: {variant.__name__.split('.')[-1]}")
+            else:
+                self._render(variant.BITMAP)
+            if self._anim_stop.wait(timeout=random.uniform(1.5, 3.0)):
+                break
 
     def _blink(self):
-        """Quick 3-frame blink: open → half → closed → half → open."""
         if config.MOCK_SERVOS:
             return
         for bitmap in [_IDLE_HALF_BLINK, _IDLE_BLINK, _IDLE_HALF_BLINK, _IDLE_OPEN]:
@@ -159,7 +167,6 @@ class OLEDDisplay:
             time.sleep(0.07)
 
     def _glance(self):
-        """Eyes shift left or right then return to centre."""
         if config.MOCK_SERVOS:
             return
         direction = random.choice([_IDLE_LOOK_LEFT, _IDLE_LOOK_RIGHT])

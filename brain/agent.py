@@ -1,4 +1,11 @@
 import cv2
+import os
+import sys
+import termios
+import tty
+import threading
+import time
+import random
 from motion.servo_controller import ServoController
 from motion.gait import GaitController
 from vision.detector import VisionDetector
@@ -9,19 +16,37 @@ from modules.detector import ModuleDetector
 from modules.pir import PIRSensor
 from modules.dht11 import DHT11Sensor
 from brain import llm
+from motion.animations import Animations
 from utils.logger import log
 import config
-import time
 
 
 class Agent:
     def __init__(self):
+        self._interrupt = threading.Event()
+        self._demo_mode = False
+        self._start_key_listener()
+
         log("Initialising servos...", level="info")
         self.sc   = ServoController()
         self.gait = GaitController(self.sc)
+        self.anim = Animations(self.sc)
 
         log("Initialising vision...", level="info")
         self.vision = VisionDetector()
+
+        # Shared camera state — written by capture thread, read by display + detect
+        self._raw_frame     = None
+        self._frame_lock    = threading.Lock()
+        self._last_dets     = []
+        self._det_lock      = threading.Lock()
+
+        self._start_capture_thread()
+        self._display_ok = self._check_display()
+        if self._display_ok:
+            log("Camera feed window starting.", level="info")
+        else:
+            log("No display detected — camera feed disabled.", level="info")
 
         log("Initialising display...", level="info")
         self.oled = OLEDDisplay()
@@ -33,18 +58,77 @@ class Agent:
         log("Detecting module...", level="info")
         self.module = ModuleDetector()
 
-        # Sensors are optional — gracefully skip if hardware is absent
         self.pir = self._try_init(PIRSensor,   "PIR sensor")
         self.dht = self._try_init(DHT11Sensor, "DHT11 sensor")
 
-        if config.SHOW_CAMERA_FEED:
-            cv2.namedWindow(config.CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(config.CAMERA_WINDOW_NAME, 960, 720)
-            log("Camera feed window opened.", level="info")
+    # ------------------------------------------------------------------
+    # Camera threads
+    # ------------------------------------------------------------------
+
+    def _check_display(self) -> bool:
+        if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            return False
+        try:
+            cv2.namedWindow("_probe", cv2.WINDOW_NORMAL)
+            cv2.destroyWindow("_probe")
+            return True
+        except Exception:
+            return False
+
+    def _start_capture_thread(self):
+        def _capture():
+            while True:
+                ok, frame = self.vision.cam.read()
+                if ok:
+                    with self._frame_lock:
+                        self._raw_frame = frame
+                else:
+                    time.sleep(0.01)
+
+        t = threading.Thread(target=_capture, daemon=True)
+        t.start()
+
+    def _display_main_loop(self):
+        """Runs on the main thread — OpenCV GUI requires this on Linux/GTK."""
+        cv2.namedWindow(config.CAMERA_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(config.CAMERA_WINDOW_NAME, 960, 720)
+        while True:
+            with self._frame_lock:
+                frame = self._raw_frame
+            if frame is not None:
+                with self._det_lock:
+                    dets = list(self._last_dets)
+                annotated = self.vision.annotate(frame, dets)
+                cv2.imshow(config.CAMERA_WINDOW_NAME, annotated)
+            cv2.waitKey(1)
+            time.sleep(0.033)  # ~30 fps
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _start_key_listener(self):
+        def _listen():
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                while True:
+                    ch = sys.stdin.read(1)
+                    if ch == ' ':
+                        self._interrupt.set()
+                        log("Interrupt! Stopping current action.", level="info")
+                    elif ch == 'q':
+                        self._demo_mode = not self._demo_mode
+                        state = "ON" if self._demo_mode else "OFF"
+                        log(f"Demo mode {state} — listening {'paused' if self._demo_mode else 'resumed'}.", level="info")
+            except Exception:
+                pass
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
 
     @staticmethod
     def _try_init(cls, name: str):
@@ -57,23 +141,16 @@ class Agent:
             return None
 
     def _detect(self) -> list:
-        """
-        Capture a frame, run detection, and optionally show the annotated feed.
-        Returns the detection results list.
-        """
-        if config.SHOW_CAMERA_FEED:
-            detections, frame = self.vision.detect_with_frame()
-            try:
-                cv2.imshow(config.CAMERA_WINDOW_NAME, frame)
-                cv2.waitKey(1)  # non-blocking — just refreshes the window
-            except Exception:
-                pass  # if display is unavailable, don't crash the agent
-            return detections
-        else:
-            return self.vision.detect()
+        with self._frame_lock:
+            frame = self._raw_frame
+        if frame is None:
+            return []
+        detections = self.vision._run_detection(frame)
+        with self._det_lock:
+            self._last_dets = detections
+        return detections
 
     def _read_sensors(self) -> dict:
-        """Collect live readings from any attached sensor modules."""
         data = {}
         if self.pir:
             try:
@@ -91,13 +168,23 @@ class Agent:
                 pass
         return data
 
+    _SPEAK_FACES = ["happy", "excited", "surprised", "happy", "excited"]
+
     def _handle_speak(self, decision: dict):
         text = decision.get("text", "")
-        if text:
-            self.tts.speak(text)
+        if not text:
+            return
+        stop_cycling = threading.Event()
+        def _cycle():
+            while not stop_cycling.wait(timeout=random.uniform(0.7, 1.3)):
+                self.oled.show(random.choice(self._SPEAK_FACES))
+        t = threading.Thread(target=_cycle, daemon=True)
+        t.start()
+        self.tts.speak(text)
+        stop_cycling.set()
+        t.join(timeout=0.5)
 
     def _handle_set_mode(self, decision: dict, current_mode: str) -> str:
-        """Switch robot mode. Returns the new mode string."""
         new_mode = decision.get("mode", current_mode)
         if new_mode not in ("general", "security", "environment", "search_rescue"):
             log(f"Unknown mode '{new_mode}' — staying in {current_mode}", level="warn")
@@ -112,6 +199,14 @@ class Agent:
     # ------------------------------------------------------------------
 
     def run(self):
+        t = threading.Thread(target=self._run_logic, daemon=True)
+        t.start()
+        if self._display_ok:
+            self._display_main_loop()  # blocks main thread — OpenCV needs it
+        else:
+            t.join()
+
+    def _run_logic(self):
         self.sc.stand()
         self.oled.show("idle")
         mode = self.module.detect()
@@ -119,33 +214,31 @@ class Agent:
         mode_label = mode.replace("_", " ")
         self.tts.speak(f"Hey! I'm Cleo. {mode_label} mode active. Let's go!")
 
-        prompted = False
-        last_idle_motion = time.monotonic()
+        last_activity  = time.time()
+        demo_last_tick = time.time()
 
         while True:
-            self.oled.show("idle")
+            self._interrupt.clear()
 
-            if not prompted:
-                self.tts.speak("I'm listening.")
-                prompted = True
+            if self._demo_mode:
+                self.oled.show("happy")
+                time.sleep(1)
+                if time.time() - demo_last_tick >= config.IDLE_DANCE_TIMEOUT:
+                    self._demo_tick()
+                    demo_last_tick = time.time()
+                last_activity = time.time()
+                continue
 
+            self.oled.show("happy")
             user_input = self.stt.listen(duration=5)
 
             if not user_input:
-                # Keep the camera feed alive even while waiting for speech
-                if config.SHOW_CAMERA_FEED:
-                    self._detect()
-
-                # Run a subtle idle animation every N seconds while waiting.
-                interval = getattr(config, "IDLE_ANIMATION_INTERVAL", 30.0)
-                if getattr(config, "IDLE_ANIMATION_ENABLED", True):
-                    now = time.monotonic()
-                    if (now - last_idle_motion) >= interval:
-                        try:
-                            self.gait.idle()
-                        except Exception as e:
-                            log(f"Idle animation failed: {e}", level="warn")
-                        last_idle_motion = now
+                if time.time() - last_activity >= config.IDLE_DANCE_TIMEOUT:
+                    self.oled.show("tongue_out")
+                    self.anim.dance()
+                    self.oled.show("happy")
+                    self.sc.stand()
+                    last_activity = time.time()
                 continue
 
             self.oled.show("thinking")
@@ -155,24 +248,32 @@ class Agent:
             action      = decision.get("action", "stop")
 
             log(f"Top-level action: {action}", level="info")
+            last_activity = time.time()
 
             if action == "speak":
                 self._handle_speak(decision)
-                prompted = False
 
             elif action == "set_mode":
-                mode     = self._handle_set_mode(decision, mode)
-                prompted = False
+                mode = self._handle_set_mode(decision, mode)
 
             elif action == "complete":
                 self.oled.show("happy")
                 self.tts.speak("Already done! Easy.")
                 self.sc.stand()
-                prompted = False
 
             elif action == "stop":
                 self.sc.stand()
-                prompted = False
+
+            elif action == "wave":
+                self.oled.show("happy")
+                self.anim.wave()
+                self.sc.stand()
+
+            elif action == "dance":
+                self.oled.show("tongue_out")
+                self.anim.dance()
+                self.oled.show("happy")
+                self.sc.stand()
 
             else:
                 self.tts.speak("On it!")
@@ -181,23 +282,54 @@ class Agent:
                     mode         = mode,
                     first_action = action,
                 )
-                prompted = False
 
     # ------------------------------------------------------------------
     # Mission execution
     # ------------------------------------------------------------------
 
+    _LOOK_FACES = ["searching", "searching_alert", "thinking_sideways", "thinking_up", "surprised"]
+
+    def _demo_tick(self):
+        for face in random.sample(self._LOOK_FACES, 3):
+            self.oled.show(face)
+            time.sleep(0.6)
+        if random.random() < 0.5:
+            self.oled.show("tongue_out")
+            self.anim.dance()
+        else:
+            self.oled.show("happy")
+            self.anim.wave()
+        self.sc.stand()
+        self.tts.speak(random.choice([
+            "Hey, anybody there?",
+            "Hello? Anyone around?",
+            "Come talk to me!",
+        ]))
+        self.oled.show("happy")
+
+    def _interrupted(self) -> bool:
+        if self._interrupt.is_set():
+            self._interrupt.clear()
+            return True
+        return False
+
     def _run_mission(self, mission: str, mode: str, first_action: str) -> str:
-        """
-        Execute a physical mission until complete, max steps reached, or mode switch.
-        Returns the current mode (may have changed mid-mission via set_mode).
-        """
         self.oled.show("searching")
-        max_steps = 30
+        max_steps = config.MISSION_MAX_STEPS
+
+        if self._interrupted():
+            self.sc.stand()
+            return mode
 
         self.gait.execute(first_action)
 
         for step in range(max_steps - 1):
+            if self._interrupted():
+                log("Mission interrupted by spacebar.", level="info")
+                self.sc.stand()
+                self.oled.show("happy")
+                return mode
+
             self.oled.show("thinking")
             detections  = self._detect()
             sensor_data = self._read_sensors()
@@ -227,7 +359,7 @@ class Agent:
 
             elif action == "stop":
                 self.sc.stand()
-                self.oled.show("idle")
+                self.oled.show("happy")
                 return mode
 
             else:
@@ -236,5 +368,5 @@ class Agent:
 
         self.tts.speak("Hmm, I couldn't finish that one. Sorry!")
         self.sc.stand()
-        self.oled.show("idle")
+        self.oled.show("happy")
         return mode
