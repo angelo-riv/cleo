@@ -46,6 +46,14 @@ GAIT_STEP_ANGLE = 20    # degrees hip swings per step
 GAIT_LIFT_ANGLE = 30    # degrees knee lifts per step
 GAIT_STEP_DELAY = 0.15  # seconds between each phase
 
+# --- Idle animation (subtle motion while waiting) ---
+# Runs only in the main "listening" loop when no speech is detected.
+IDLE_ANIMATION_ENABLED  = True
+IDLE_ANIMATION_INTERVAL = 30.0  # seconds between idle motions
+IDLE_HIP_SWAY_ANGLE     = 8     # degrees (small, safe offset)
+IDLE_KNEE_LIFT_ANGLE    = 12    # degrees (small, safe lift)
+IDLE_STEP_DELAY         = 0.10  # seconds between each phase
+
 # --- PCA9685 ---
 I2C_BUS         = 1
 PCA9685_ADDRESS = 0x40

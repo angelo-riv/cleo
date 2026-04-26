@@ -11,6 +11,7 @@ from modules.dht11 import DHT11Sensor
 from brain import llm
 from utils.logger import log
 import config
+import time
 
 
 class Agent:
@@ -119,6 +120,7 @@ class Agent:
         self.tts.speak(f"Hey! I'm Cleo. {mode_label} mode active. Let's go!")
 
         prompted = False
+        last_idle_motion = time.monotonic()
 
         while True:
             self.oled.show("idle")
@@ -133,6 +135,17 @@ class Agent:
                 # Keep the camera feed alive even while waiting for speech
                 if config.SHOW_CAMERA_FEED:
                     self._detect()
+
+                # Run a subtle idle animation every N seconds while waiting.
+                interval = getattr(config, "IDLE_ANIMATION_INTERVAL", 30.0)
+                if getattr(config, "IDLE_ANIMATION_ENABLED", True):
+                    now = time.monotonic()
+                    if (now - last_idle_motion) >= interval:
+                        try:
+                            self.gait.idle()
+                        except Exception as e:
+                            log(f"Idle animation failed: {e}", level="warn")
+                        last_idle_motion = now
                 continue
 
             self.oled.show("thinking")
