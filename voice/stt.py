@@ -23,7 +23,20 @@ class SpeechToText:
         )
         sd.wait()
         audio_flat = audio.flatten()
+
+        # Ignore silent recordings — RMS below threshold means no one spoke
+        rms = float(np.sqrt(np.mean(audio_flat ** 2)))
+        if rms < config.MIC_SILENCE_THRESHOLD:
+            print("Heard: (silence)")
+            return ""
+
         segments, _ = self.model.transcribe(audio_flat, language="en")
         transcript = " ".join(s.text for s in segments).strip()
         print(f"Heard: {transcript}")
+
+        # Ignore fragments that are too short to be a real command
+        if len(transcript.split()) < config.MIN_WORDS_TO_PROCESS:
+            print(f"Ignored (too short): {transcript!r}")
+            return ""
+
         return transcript
