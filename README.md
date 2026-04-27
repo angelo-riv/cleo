@@ -1,5 +1,11 @@
 # Quadruped Robot
 
+## Photos
+
+![Cleo robot photo](photos/IMG_6079.jpg)
+
+![Cleo screenshot](photos/Screenshot%202026-04-26%20012532.png)
+
 An autonomous 4-legged robot powered by a Raspberry Pi and Google Gemini AI. Speak to it, give it missions, and it walks, looks, thinks, and talks back. Supports multiple AI personality modes switchable by voice at any time.
 
 > For full software architecture, data flows, and code documentation see [ARCHITECTURE.md](ARCHITECTURE.md).
